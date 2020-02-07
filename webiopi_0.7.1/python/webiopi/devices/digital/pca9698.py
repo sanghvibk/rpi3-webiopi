@@ -19,7 +19,7 @@
 #   Config parameters
 #
 #   - slave         7 bit       I2C slave address
-#   - invert_oe     yes, no     Invert OE pin 
+#   - invert_oe     yes, no     Invert OE pin
 #   - outconf       8 bit       Value of the OUTCONF register
 #
 #   Usage remarks
@@ -32,7 +32,7 @@
 #   - The polarity inversion and interrupt masking functions are currently
 #     not suppoprted
 #   - The GPIO all call and the all banks control functions are currently
-#     not supported 
+#     not supported
 #
 
 from webiopi.utils.types import toint
@@ -46,7 +46,7 @@ class PCA9698(GPIOPort, I2C):
 
     FUNCTIONS = []          # Needed for performance improvements
     INPUTMASK = 0           # dito
-    
+
     # I2C Registers (currently unused ones are commented out)
     IP0         = 0x00      # IP0 input port (read only) register address
                             # IP1-4 are sequential from 0x01 to 0x04
@@ -55,7 +55,7 @@ class PCA9698(GPIOPort, I2C):
     #PI0        = 0x10      # PI0 polarity inversion (write/read) register address
                             # PI1-4 are sequential from 0x11 to 0x14
     IOC0        = 0x18      # IOC0 I/O configuration register address
-                            # IOC1-4 are sequential from 0x19 to 0x1C                            
+                            # IOC1-4 are sequential from 0x19 to 0x1C
                             # direction control values are input=1 output=0
     #MSK0       = 0x20      # MSK0 mask interrupt (write/read) register address
                             # MSK1-4 are sequential from 0x21 to 0x24
@@ -63,13 +63,13 @@ class PCA9698(GPIOPort, I2C):
     #ALLBNK      = 0x29     # Control all banks register address
     MODE         = 0x2A     # Mode selection register address
 
-    # Flags (currently unused ones are commented out)    
+    # Flags (currently unused ones are commented out)
     FLAG_AUTOINC  = 1 << 7  # Address bit to be set for address autoincrement
     FLAG_OEPOLHI  = 1       # OEPOL bit to be set for OE to be active high
     #FLAG_IOACON   = 1 << 3  # IOAC bit to be set to activate GPIO ALL CALL
-                            
+
     # Constants
-    CHANNELS      = 40      # This chip has 40 I/O ports organized as 
+    CHANNELS      = 40      # This chip has 40 I/O ports organized as
     BANKS         = 5       # 5 banks (@8bit each)
 
     # Defaults
@@ -77,70 +77,80 @@ class PCA9698(GPIOPort, I2C):
 
 
 #---------- Class initialisation ----------
-         
-    def __init__(self, slave=0x20, invert_oe=False, outconf=0xFF):
+
+    def __init__(self, slave=0x20, invert_oe=False, outconf=0xFF, defaultioconf=0xFF):
         # Check parameter sanity
         oconf = toint(outconf)
         if oconf != 0xFF:
             if not oconf in range(0, 0xFF):
                 raise ValueError("outconf value %d out of range [%d..%d]" % (oconf, 0x00, 0xFE))
 
+        dioconf = toint(defaultioconf)
+        if dioconf != 0xFF and dioconf != 0x00:
+            raise ValueError("defaultioconf value %d is not valid. Specify %d or %d" % (dioconf, 0x00, 0xFF))
+
         # Go for it
         I2C.__init__(self, toint(slave))
         GPIOPort.__init__(self, self.CHANNELS, self.BANKS)
-        
+
         iv_oe = str2bool(invert_oe)
         if iv_oe:
             self.writeRegister(self.MODE, (self.VAL_MODEDEF | self.FLAG_OEPOLHI))
         else:
             self.writeRegister(self.MODE, self.VAL_MODEDEF)
-            
+
         self.writeRegister(self.OUTCONF, oconf)
-        self.reset()
-        
+        self.reset(dioconf)
+
 
 #---------- Abstraction framework contracts ----------
-              
+
     def __str__(self):
         return "PCA9698(slave=0x%02X)" % self.slave
 
 
 #---------- GPIOPort abstraction related methods ----------
-            
+
     def __digitalRead__(self, channel):
         if self.FUNCTIONS[channel] == self.OUT:
             # Read output latches for output ports
             reg_base = self.OP0
         else:
-            reg_base = self.IP0                          
-        (addr, mask) = self.__getChannel__(reg_base, channel) 
+            reg_base = self.IP0
+        (addr, mask) = self.__getChannel__(reg_base, channel)
         d = self.readRegister(addr)
         return (d & mask) == mask
 
     def __digitalWrite__(self, channel, value):
-        (addr, mask) = self.__getChannel__(self.OP0, channel) 
+        if self.FUNCTIONS[channel] == self.IN:
+            return
+        (addr, mask) = self.__getChannel__(self.OP0, channel)
         d = self.readRegister(addr)
         if value:
             d |= mask
         else:
             d &= ~mask
         self.writeRegister(addr, d)
-        
+
     def __getFunction__(self, channel):
+        (addr, mask) = self.__getChannel__(self.IOC0, channel)
+        d = self.readRegister(addr)
+        self.FUNCTIONS[channel] = self.IN if ((d & mask) == mask) else self.OUT
+        self.__updateInputMask__()
         return self.FUNCTIONS[channel]
-                                       
+
     def __setFunction__(self, channel, value):
         if not value in [self.IN, self.OUT]:
             raise ValueError("Requested function not supported")
-        
-        (addr, mask) = self.__getChannel__(self.IOC0, channel) 
+
+        (addr, mask) = self.__getChannel__(self.IOC0, channel)
         d = self.readRegister(addr)
         if value == self.IN:
             d |= mask
         else:
             d &= ~mask
         self.writeRegister(addr, d)
-        
+
         self.FUNCTIONS[channel] = value
         self.__updateInputMask__()
 
@@ -150,17 +160,17 @@ class PCA9698(GPIOPort, I2C):
         ipvalue = 0
         for i in range(self.BANKS):
             ipvalue |= ipdata[i] << 8*i
-            
+
         opdata = self.readRegisters((self.FLAG_AUTOINC | self.OP0), self.BANKS)
         opvalue = 0
         for i in range(self.BANKS):
             opvalue |= opdata[i] << 8*i
-        
-        (ipmask, opmask) = self.__getFunctionMasks__()    
+
+        (ipmask, opmask) = self.__getFunctionMasks__()
         return (ipvalue & ipmask) | (opvalue & opmask)
 
     def __portWrite__(self, value):
-        data = bytearray(self.BANKS)        
+        data = bytearray(self.BANKS)
         for i in range(self.BANKS):
             data[i] = (value >> 8*i) & 0xFF
         self.writeRegisters((self.FLAG_AUTOINC | self.OP0), data)
@@ -168,17 +178,17 @@ class PCA9698(GPIOPort, I2C):
 
 #---------- Device features ----------
 
-    def reset(self):
-        self.__resetFunctions__()
+    def reset(self, defaultioconf):
+        self.__resetFunctions__(defaultioconf)
         self.__resetOutputs__()
-  
+
 
 #---------- Local helpers ----------
 
-    def __resetFunctions__(self):
+    def __resetFunctions__(self, defaultioconf):
         # Default is to have all ports as input
-        self.writeRegisters((self.FLAG_AUTOINC | self.IOC0), bytearray([0xFF for i in range (self.BANKS)]))
-        self.FUNCTIONS = [self.IN for i in range(self.CHANNELS)]
+        self.writeRegisters((self.FLAG_AUTOINC | self.IOC0), bytearray([defaultioconf for i in range(self.BANKS)]))
+        self.FUNCTIONS = [self.IN if defaultioconf else self.OUT for i in range(self.CHANNELS)]
         self.__updateInputMask__()
 
     def __resetOutputs__(self):
@@ -191,10 +201,10 @@ class PCA9698(GPIOPort, I2C):
 
     def __getChannel__(self, register, channel):
         self.checkDigitalChannel(channel)
-        addr = self.__getAddress__(register, channel) 
+        addr = self.__getAddress__(register, channel)
         mask = 1 << (channel % 8)
         return (addr, mask)
-            
+
     def __updateInputMask__(self):
         channels = self.digitalChannelCount
         self.INPUTMASK = 0
@@ -209,5 +219,5 @@ class PCA9698(GPIOPort, I2C):
         # & expression is necessary to avoid 2's complement problems with using
         # ~ on very large numbers
 
-        
+
 
